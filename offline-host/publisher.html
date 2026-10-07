@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Publish PICSHARE Event</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/publisher.js"></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="brand">PICSHARE</header>
+    <section class="card">
+      <p class="eyebrow">Local publisher</p>
+      <h1 id="event-name">Loading event…</h1>
+      <p id="event-count" class="muted"></p>
+      <p class="note">Publishing prepares new face descriptors in this browser and uploads compressed photos to Cloudflare. Keep this page open. You can resume after an interruption.</p>
+      <form id="publisher-form" class="form">
+        <label for="worker">Offline event Worker URL</label>
+        <input id="worker" name="worker" type="url" placeholder="https://picshare-offline-events.example.workers.dev" required>
+        <label for="token">Publishing token</label>
+        <input id="token" name="token" type="password" autocomplete="off" required>
+        <button type="submit">Publish event</button>
+      </form>
+      <progress id="progress" value="0" max="1"></progress>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+      <a id="published-link" hidden></a>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10192d">
+  <title>PICSHARE Event</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/guest.js"></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="brand">PICSHARE</header>
+    <section class="card">
+      <p class="eyebrow">Event photos</p>
+      <h1 id="event-title">Loading event…</h1>
+      <p id="event-brand" class="muted"></p>
+      <div id="code-panel" hidden>
+        <form id="code-form" class="form">
+          <label for="code">Event code</label>
+          <input id="code" name="code" type="password" required autocomplete="off">
+          <button type="submit">Open event</button>
+        </form>
+      </div>
+      <div id="search-panel" hidden>
+        <form id="search-form" class="form">
+          <label for="selfie">Your selfie</label>
+          <input id="selfie" name="selfie" type="file" accept="image/*" required>
+          <button type="submit">Find my photos</button>
+        </form>
+        <p class="note">Your selfie stays on this device. Only a face descriptor is sent for matching. The published gallery contains compressed previews.</p>
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </section>
+    <section id="gallery" class="gallery" aria-label="Matching photos"></section>
+  </main>
+</body>
+</html>

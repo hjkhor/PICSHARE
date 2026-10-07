@@ -1,0 +1,8 @@
+node_modules/
+public/guest.js
+public/models/
+public/face-api-license.txt
+.wrangler/
+.publisher-cache/
+.dev.vars
+__pycache__/

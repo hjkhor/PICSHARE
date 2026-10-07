@@ -16,6 +16,7 @@ class FaceService:
         if self.app is None:
             # name='antelopev2' or 'buffalo_l' for better accuracy
             self.app = FaceAnalysis(name='buffalo_l',
+                                    allowed_modules=['detection', 'recognition'],
                                     providers=['CPUExecutionProvider'],
                                     root=settings.FACE_MODEL_ROOT)
             self.app.prepare(ctx_id=0, det_size=(640, 640))

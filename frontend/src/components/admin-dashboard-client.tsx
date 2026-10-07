@@ -10,6 +10,20 @@ import Cookies from "js-cookie";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
+function PrivateImage({src, alt, className, onClick, onError}: {src: string; alt: string; className?: string; onClick?: () => void; onError?: React.ReactEventHandler<HTMLImageElement>}) {
+    const [url, setUrl] = useState<string>();
+    useEffect(() => {
+        const controller = new AbortController();
+        let objectUrl: string | undefined;
+        fetch(src, {headers: {Authorization: `Bearer ${Cookies.get("admin_token")}`}, signal: controller.signal})
+            .then(r => {if (!r.ok) throw new Error("Image unavailable"); return r.blob();})
+            .then(blob => {objectUrl = URL.createObjectURL(blob); setUrl(objectUrl);})
+            .catch(() => {});
+        return () => {controller.abort(); if (objectUrl) URL.revokeObjectURL(objectUrl);};
+    }, [src]);
+    return url ? <img src={url} alt={alt} className={className} onClick={onClick} onError={onError} /> : <div className={className} aria-label={alt} />;
+}
+
 interface Event {
     _id: string;
     name: string;
@@ -25,7 +39,7 @@ interface Event {
 interface Guest {
     id: string;
     name: string;
-    email: string;
+    email?: string;
     phone?: string;
     selfie_path?: string;
     status: string;
@@ -289,6 +303,7 @@ const CopyButton = ({ slug }: { slug: string }) => {
 
 export default function AdminDashboardClient() {
     const [events, setEvents] = useState<Event[]>([]);
+    const [profile, setProfile] = useState<{name: string; brand_name: string; drive_connected: boolean; google_email?: string; google_signin_enabled: boolean} | null>(null);
     const [loading, setLoading] = useState(true);
     const [creating, setCreating] = useState(false);
     const [syncing, setSyncing] = useState<Record<string, boolean>>({});
@@ -335,7 +350,8 @@ export default function AdminDashboardClient() {
             return;
         }
         fetchEvents();
-    }, [router, fetchEvents]);
+        fetch(`${API_URL}/auth/me`, {headers: {Authorization: `Bearer ${token}`}}).then(r => { if (!r.ok) throw new Error(); return r.json(); }).then(setProfile).catch(() => { Cookies.remove("admin_token"); router.push("/admin/login"); });
+    }, [router, fetchEvents, API_URL]);
 
     // Poll for event list updates if any event is syncing
     useEffect(() => {
@@ -441,6 +457,34 @@ export default function AdminDashboardClient() {
             console.error("Update error:", error);
             toast.error("Network error");
         }
+    };
+
+    const handleConnectDrive = async () => {
+        const token = Cookies.get("admin_token");
+        const response = await fetch(`${API_URL}/auth/google/connect`, {headers: {Authorization: `Bearer ${token}`}});
+        const data = await response.json();
+        if (response.ok) window.location.assign(data.url);
+        else toast.error(data.detail || "Could not connect Google Drive");
+    };
+
+    const handleLinkGoogleSignin = async () => {
+        try {
+            const token = Cookies.get("admin_token");
+            const response = await fetch(`${API_URL}/auth/google/link`, {headers: {Authorization: `Bearer ${token}`}});
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.detail || "Could not enable Google sign-in");
+            window.location.assign(data.url);
+        } catch (error) {
+            toast.error(error instanceof Error ? error.message : "Could not enable Google sign-in");
+        }
+    };
+
+    const openPrivatePhoto = async (photoId: string) => {
+        const response = await fetch(`${API_URL}/photos/original/${photoId}`, {headers: {Authorization: `Bearer ${Cookies.get("admin_token")}`}});
+        if (!response.ok) {toast.error("Could not open photo"); return;}
+        const url = URL.createObjectURL(await response.blob());
+        window.open(url, "_blank", "noopener,noreferrer");
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
     };
 
     const handleLogout = () => {
@@ -621,7 +665,7 @@ export default function AdminDashboardClient() {
         const searchTerm = guestFilter.toLowerCase();
         return (
             guest.name.toLowerCase().includes(searchTerm) ||
-            guest.email.toLowerCase().includes(searchTerm)
+            (guest.email || "").toLowerCase().includes(searchTerm)
         );
     });
 
@@ -634,11 +678,17 @@ export default function AdminDashboardClient() {
     }
 
     return (
-        <div className="bg-background p-6 transition-colors duration-300">
-            <header className="max-w-6xl mx-auto flex items-center justify-between mb-8">
+        <div className="photographer-dashboard bg-background p-6 transition-colors duration-300">
+            <header className="dashboard-head max-w-6xl mx-auto flex items-center justify-between mb-8">
                 <div>
-                    <h1 className="text-3xl font-bold text-foreground font-sans tracking-tight">Admin Dashboard</h1>
-                    <p className="text-muted-foreground">Manage events and automated Drive sync</p>
+                    <p className="eyebrow">[ PHOTOGRAPHER WORKSPACE ]</p>
+                    <h1 className="text-3xl font-bold text-foreground font-sans tracking-tight">{profile?.brand_name || "Photographer Dashboard"}</h1>
+                    <p className="text-muted-foreground">CREATE / CONNECT / SHARE</p>
+                    <p className="text-sm mt-2">{profile?.drive_connected ? `Drive connected: ${profile.google_email || "Google account"}` : "Connect your Google Drive before syncing an event."}</p>
+                    <Button variant="outline" className="mt-2" onClick={handleConnectDrive}>{profile?.drive_connected ? "Reconnect Google Drive" : "Connect Google Drive"}</Button>
+                    {profile?.google_signin_enabled ?
+                        <p className="text-xs text-muted-foreground mt-2">Google sign-in enabled</p> :
+                        <Button variant="outline" className="mt-2 ml-2" onClick={handleLinkGoogleSignin}>Enable Google sign-in</Button>}
                 </div>
                 <Button variant="outline" onClick={handleLogout} className="gap-2 border-border bg-card hover:bg-muted">
                     <LogOut className="w-4 h-4" />
@@ -739,7 +789,7 @@ export default function AdminDashboardClient() {
             {/* Event List */}
             <div className="max-w-6xl mx-auto mt-12">
                 <div className="flex items-center justify-between mb-6">
-                    <h2 className="text-2xl font-bold text-foreground tracking-tight">Active Events</h2>
+                    <h2 className="text-2xl font-bold text-foreground tracking-tight">YOUR EVENTS</h2>
                     <div className="text-xs text-muted-foreground font-medium bg-card px-3 py-1 rounded-full border border-border shadow-sm">
                         {events.length} Events Total
                     </div>
@@ -804,11 +854,11 @@ export default function AdminDashboardClient() {
                                     </div>
                                 )}
 
-                                <div className="flex gap-2">
+                                <div className="event-actions flex gap-2">
                                     <Button
                                         variant="default"
                                         size="sm"
-                                        disabled={syncing[event._id] || !event.drive_folder_url || event.sync_status === "syncing"}
+                                        disabled={syncing[event._id] || !profile?.drive_connected || !event.drive_folder_url || event.sync_status === "syncing"}
                                         onClick={() => handleSyncPhotos(event._id)}
                                         className="h-9 flex-1 bg-indigo-600 hover:bg-indigo-700 text-white shadow-md shadow-indigo-100 dark:shadow-none border-none"
                                     >
@@ -886,7 +936,7 @@ export default function AdminDashboardClient() {
                                 <div className="relative">
                                     <Input
                                         type="text"
-                                        placeholder="Search by name or email..."
+                                        placeholder="Search by name..."
                                         value={guestFilter}
                                         onChange={(e) => setGuestFilter(e.target.value)}
                                         className="pl-10 bg-background border-border"
@@ -954,7 +1004,7 @@ export default function AdminDashboardClient() {
                                                         <div className="flex items-center gap-3">
                                                             <div className="relative flex-shrink-0">
                                                                 {guest.selfie_path ? (
-                                                                    <img
+                                                                    <PrivateImage
                                                                         src={`${API_URL}/guests/selfie/${guest.id}`}
                                                                         alt={guest.name}
                                                                         className="w-10 h-10 sm:w-12 sm:h-12 rounded-full object-cover border-2 border-indigo-200 dark:border-indigo-800"
@@ -967,12 +1017,12 @@ export default function AdminDashboardClient() {
                                                             </div>
                                                             <div className="min-w-0">
                                                                 <p className="font-bold text-foreground text-sm sm:text-base truncate">{guest.name}</p>
-                                                                <p className="text-xs text-muted-foreground truncate sm:hidden">{guest.email}</p>
+                                                                {guest.email && <p className="text-xs text-muted-foreground truncate sm:hidden">{guest.email}</p>}
                                                             </div>
                                                         </div>
                                                     </td>
                                                     <td className="p-3 hidden sm:table-cell">
-                                                        <p className="text-sm text-foreground truncate">{guest.email}</p>
+                                                        {guest.email && <p className="text-sm text-foreground truncate">{guest.email}</p>}
                                                         {guest.phone && (
                                                             <p className="text-xs text-muted-foreground mt-0.5">{guest.phone}</p>
                                                         )}
@@ -1123,7 +1173,7 @@ export default function AdminDashboardClient() {
 
                                             {/* Photo */}
                                             <div className="aspect-square bg-muted relative">
-                                                <img
+                                                <PrivateImage
                                                     src={`${API_URL}/photos/thumbnail/${photo.id}`}
                                                     alt={photo.original_file_name}
                                                     className="w-full h-full object-cover cursor-pointer"
@@ -1149,9 +1199,7 @@ export default function AdminDashboardClient() {
                                                         className="h-7 text-xs"
                                                         asChild
                                                     >
-                                                        <a href={`${API_URL}/photos/original/${photo.id}`} target="_blank" rel="noopener noreferrer">
-                                                            View Full
-                                                        </a>
+                                                        <button type="button" onClick={() => openPrivatePhoto(photo.id)}>View Full</button>
                                                     </Button>
                                                 </div>
                                             </div>

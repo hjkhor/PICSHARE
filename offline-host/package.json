@@ -1,0 +1,17 @@
+{
+  "name": "picshare-offline-host",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "wrangler dev",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "dependencies": {
+    "@vladmandic/face-api": "1.7.15"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "wrangler": "^4.45.0"
+  }
+}

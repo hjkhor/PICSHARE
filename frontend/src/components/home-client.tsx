@@ -1,82 +1,47 @@
 "use client";
 
-import React from "react";
-import { useRouter } from "next/navigation";
-import { Button } from "@/components/ui/button";
-import { Camera, Sparkles, ShieldCheck, Zap, ArrowRight, PartyPopper } from "lucide-react";
+import Link from "next/link";
+import { ArrowUpRight, Camera, ScanFace, FolderSync, Share2 } from "lucide-react";
+
+const steps = [
+  { number: "01", icon: FolderSync, title: "CONNECT YOUR DRIVE", body: "Connect an event folder in Google Drive. PICSHARE indexes its photos for matching." },
+  { number: "02", icon: Share2, title: "DROP THE LINK", body: "Give your guests one link to their event. Add an access code when you need one." },
+  { number: "03", icon: ScanFace, title: "FIND THE FRAME", body: "Guests add a selfie and see the event photos that match them." },
+];
 
 export default function HomeClient() {
-    const router = useRouter();
-
-    return (
-        <div className="bg-background selection:bg-indigo-100/30">
-            {/* Hero Section */}
-            <header className="relative overflow-hidden bg-background pt-16 pb-32 border-b border-border">
-                <div className="absolute inset-0 bg-[radial-gradient(45%_45%_at_50%_50%,rgba(99,102,241,0.05)_0%,rgba(0,0,0,0)_100%)]" />
-
-                <div className="container relative mx-auto px-6 pt-12 text-center">
-                    <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-indigo-50 dark:bg-indigo-950/30 text-indigo-600 dark:text-indigo-400 text-sm font-semibold mb-8 border border-indigo-100 dark:border-indigo-900/50 animate-fade-in">
-                        <Sparkles className="w-4 h-4" />
-                        <span>AI-Powered Event Photography</span>
-                    </div>
-
-                    <h1 className="text-5xl md:text-7xl font-extrabold tracking-tight text-foreground mb-8 max-w-4xl mx-auto leading-[1.1]">
-                        Find every photo of yourself, <span className="text-indigo-600 dark:text-indigo-400">instantly.</span>
-                    </h1>
-
-                    <p className="text-lg md:text-xl text-muted-foreground mb-12 max-w-2xl mx-auto leading-relaxed">
-                        No more hunting through thousands of event photos. Upload a selfie and our AI will find every moment you captured, delivered straight to your personal gallery.
-                    </p>
-
-                    <div className="flex justify-center">
-                        <Button
-                            className="h-14 px-8 bg-indigo-600 hover:bg-indigo-700 text-white text-lg font-bold rounded-2xl shadow-xl shadow-indigo-200 dark:shadow-none transition-all hover:scale-105 active:scale-95 group"
-                            onClick={() => router.push('/events')}
-                        >
-                            <PartyPopper className="mr-2 w-5 h-5 group-hover:rotate-12 transition-transform" />
-                            Browse All Active Events
-                            <ArrowRight className="ml-2 w-5 h-5 group-hover:translate-x-1 transition-transform" />
-                        </Button>
-                    </div>
-                </div>
-            </header>
-
-            {/* Features Grid */}
-            <section className="py-24 bg-background">
-                <div className="container mx-auto px-6">
-                    <div className="grid md:grid-cols-3 gap-12">
-                        <div className="space-y-4">
-                            <div className="w-12 h-12 rounded-2xl bg-indigo-600 flex items-center justify-center text-white shadow-lg shadow-indigo-100 dark:shadow-none">
-                                <Camera className="w-6 h-6" />
-                            </div>
-                            <h3 className="text-xl font-bold text-foreground">One Selfie Only</h3>
-                            <p className="text-muted-foreground leading-relaxed">
-                                Just one selfie is all we need to scan through thousands of high-resolution originals.
-                            </p>
-                        </div>
-
-                        <div className="space-y-4">
-                            <div className="w-12 h-12 rounded-2xl bg-indigo-600 flex items-center justify-center text-white shadow-lg shadow-indigo-100 dark:shadow-none">
-                                <Zap className="w-6 h-6" />
-                            </div>
-                            <h3 className="text-xl font-bold text-foreground">Instant Delivery</h3>
-                            <p className="text-muted-foreground leading-relaxed">
-                                We identify your photos instantly and create a secure personal web gallery just for you.
-                            </p>
-                        </div>
-
-                        <div className="space-y-4">
-                            <div className="w-12 h-12 rounded-2xl bg-indigo-600 flex items-center justify-center text-white shadow-lg shadow-indigo-100 dark:shadow-none">
-                                <ShieldCheck className="w-6 h-6" />
-                            </div>
-                            <h3 className="text-xl font-bold text-foreground">Private & Secure</h3>
-                            <p className="text-muted-foreground leading-relaxed">
-                                Your selfie is deleted immediately after processing. We never store your biometric data.
-                            </p>
-                        </div>
-                    </div>
-                </div>
-            </section>
+  return <div className="home-page">
+    <section className="hero-shell">
+      <div className="hero-copy">
+        <p className="eyebrow"><span className="status-dot" /> EVENT PHOTO DELIVERY / REWIRED</p>
+        <h1>EVERY<br />FRAME.<br /><span>YOUR</span> STORY.</h1>
+        <p className="hero-lead">Connect your Drive, share an event link, and deliver each guest their photos.</p>
+        <div className="hero-actions">
+          <Link href="/admin/login" className="kippo-cta">PHOTOGRAPHER WORKSPACE <ArrowUpRight size={17} /></Link>
         </div>
-    );
+        <p className="hero-footnote">[ BUILT FOR PHOTOGRAPHERS. SHARED THROUGH YOUR EVENT LINK. ]</p>
+      </div>
+      <div className="hero-visual" aria-label="Preview of a photo match">
+        <div className="visual-topline"><span>● &nbsp; PICSHARE.EXE</span><span>FRAME_001 / LIVE</span></div>
+        <div className="visual-frame">
+          <div className="visual-cross visual-cross-tl">+</div><div className="visual-cross visual-cross-tr">+</div>
+          <div className="visual-face"><Camera size={86} strokeWidth={0.7} /><span>YOUR MOMENT<br />GOES HERE</span></div>
+          <div className="visual-scan" />
+          <div className="visual-cross visual-cross-bl">+</div><div className="visual-cross visual-cross-br">+</div>
+        </div>
+        <div className="visual-footer"><span>FACE MATCH ENGINE</span><span className="visual-ready">READY TO SCAN _</span></div>
+      </div>
+    </section>
+
+    <section className="manifesto-strip" aria-label="How it works"><span>CAPTURE IT</span><b>+</b><span>SHARE IT</span><b>+</b><span>FIND IT</span></section>
+
+    <section className="how-section">
+      <div className="section-heading"><p className="eyebrow">[ HOW IT WORKS ]</p><h2>FROM DRIVE<br />TO <span>DISCOVERY.</span></h2></div>
+      <div className="step-list">{steps.map(({ number, icon: Icon, title, body }) => <article className="step-row" key={number}>
+        <span className="step-number">/{number}</span><Icon size={27} strokeWidth={1.5} aria-hidden="true" /><div><h3>{title}</h3><p>{body}</p></div><ArrowUpRight size={18} aria-hidden="true" />
+      </article>)}</div>
+    </section>
+
+    <section className="end-cta"><p className="eyebrow">[ THE NEXT FRAME IS YOURS ]</p><h2>READY TO<br /><span>DELIVER?</span></h2><Link href="/admin/login" className="kippo-cta">OPEN YOUR WORKSPACE <ArrowUpRight size={17} /></Link></section>
+  </div>;
 }

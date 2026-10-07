@@ -13,6 +13,7 @@ interface Photo {
     id: string;
     filename: string;
     thumbnail_url: string;
+    preview_url: string;
     original_url: string;
     drive_file_id: string;
 }
@@ -31,6 +32,7 @@ export default function GuestGalleryClient() {
 
     const [loading, setLoading] = useState(true);
     const [data, setData] = useState<GuestData | null>(null);
+    const [processing, setProcessing] = useState(false);
     const [allPhotos, setAllPhotos] = useState<Photo[]>([]);
     const [page, setPage] = useState(1);
     const [previewIndex, setPreviewIndex] = useState<number | null>(null);
@@ -74,6 +76,28 @@ export default function GuestGalleryClient() {
     useEffect(() => {
         if (guestId) fetchMatches(1);
     }, [guestId, fetchMatches]);
+
+    useEffect(() => {
+        if (!data || data.match_count > 0 || allPhotos.length > 0) return;
+        let active = true;
+        const checkStatus = async () => {
+            try {
+                const res = await fetch(`${API_URL}/guests/status/${guestId}`);
+                if (!res.ok || !active) return;
+                const status = await res.json();
+                if (!active) return;
+                setProcessing(status.status === "processing");
+                if (status.status === "completed" && status.match_count > 0) {
+                    fetchMatches(1);
+                }
+            } catch {
+                // Keep the gallery available while the connection is interrupted.
+            }
+        };
+        checkStatus();
+        const interval = setInterval(checkStatus, 3000);
+        return () => { active = false; clearInterval(interval); };
+    }, [data, allPhotos.length, API_URL, guestId, fetchMatches]);
 
     // Browser history management for preview
     useEffect(() => {
@@ -193,7 +217,7 @@ export default function GuestGalleryClient() {
     const handleDownload = async (photoId: string, filename: string) => {
         toast.info("Preparing download...");
         try {
-            const res = await fetch(`${API_URL}/photos/download/${photoId}`);
+            const res = await fetch(`${API_URL}/photos/download/${photoId}?guest_id=${guestId}`);
             if (!res.ok) throw new Error("Download failed");
 
             const blob = await res.blob();
@@ -253,7 +277,7 @@ export default function GuestGalleryClient() {
 
     const currentPreviewPhoto = previewIndex !== null ? allPhotos[previewIndex] : null;
 
-    if (loading) {
+    if (loading || processing) {
         return (
             <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4">
                 <Loader2 className="w-10 h-10 animate-spin text-indigo-600 mb-4" />
@@ -283,7 +307,7 @@ export default function GuestGalleryClient() {
     }
 
     return (
-        <div className="bg-background text-foreground transition-colors duration-300">
+        <div className="guest-gallery bg-background text-foreground transition-colors duration-300">
             {/* Gallery Header */}
             <header className="sticky top-0 z-30 w-full border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
                 <div className="container mx-auto px-4 h-16 flex items-center justify-between max-w-6xl">
@@ -299,7 +323,7 @@ export default function GuestGalleryClient() {
                         </Button>
                         <div className="h-6 w-px bg-border hidden sm:block" />
                         <div>
-                            <h2 className="font-bold text-foreground leading-none">{data.guest_name}&apos;s Gallery</h2>
+                            <h2 className="font-bold text-foreground leading-none">{data.guest_name}&apos;S GALLERY</h2>
                             <p className="text-[11px] text-muted-foreground mt-1">{data.match_count} photos matched</p>
                         </div>
                     </div>
@@ -570,7 +594,7 @@ export default function GuestGalleryClient() {
                                         onTouchEnd={handleTouchEnd}
                                     >
                                         <Image
-                                            src={`${API_URL}${currentPreviewPhoto.original_url}`}
+                                            src={`${API_URL}${currentPreviewPhoto.preview_url}`}
                                             alt={currentPreviewPhoto.filename}
                                             fill
                                             className={`object-contain transition-all duration-500 ${previewLoading ? 'opacity-0 scale-95' : 'opacity-100 scale-100'}`}

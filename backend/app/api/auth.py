@@ -1,52 +1,263 @@
-from datetime import datetime, timedelta
-from fastapi import APIRouter, HTTPException, Depends, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+import uuid
+import secrets
+import hashlib
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode, urlsplit, quote
+from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi.responses import RedirectResponse
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm, HTTPBearer, HTTPAuthorizationCredentials
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, Field
+from google_auth_oauthlib.flow import Flow
+from google.auth.transport.requests import Request as GoogleRequest
+from google.oauth2 import id_token as google_id_token
+from cryptography.fernet import Fernet
 from app.core.config import get_settings
+from app.services.db import db
 
 settings = get_settings()
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
+IDENTITY_SCOPES = ["openid", "https://www.googleapis.com/auth/userinfo.email"]
+SCOPES = [DRIVE_SCOPE, *IDENTITY_SCOPES]
+
+class Registration(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=12)
+    name: str = Field(min_length=1, max_length=100)
+    brand_name: str = Field(min_length=1, max_length=100)
 
 class Token(BaseModel):
     access_token: str
-    token_type: str
+    token_type: str = "bearer"
 
-def create_access_token(data: dict):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
-    return encoded_jwt
+class GoogleTicket(BaseModel):
+    ticket: str = Field(min_length=20, max_length=200)
+
+def create_access_token(user_id: str):
+    if settings.SECRET_KEY == "ThisIsMyLongSecretKeyForJWT":
+        raise HTTPException(status_code=503, detail="Set a private SECRET_KEY")
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    return jwt.encode({"sub": user_id, "exp": expiry}, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+async def get_current_photographer(token: str = Depends(oauth2_scheme)):
+    if settings.SECRET_KEY == "ThisIsMyLongSecretKeyForJWT":
+        raise HTTPException(status_code=503, detail="Set a private SECRET_KEY")
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        user_id = payload.get("sub")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    user = await db.fetch_one("SELECT id, email, name, brand_name FROM photographers WHERE id = ?", (user_id,))
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    return user
+
+@router.post("/register", response_model=Token)
+async def register(data: Registration):
+    if settings.SECRET_KEY == "ThisIsMyLongSecretKeyForJWT":
+        raise HTTPException(status_code=503, detail="Set a private SECRET_KEY")
+    email = data.email.lower()
+    if await db.fetch_one("SELECT id FROM photographers WHERE email = ?", (email,)):
+        raise HTTPException(status_code=409, detail="Email already registered")
+    user_id = str(uuid.uuid4())
+    await db.execute("INSERT INTO photographers (id,email,name,brand_name,password_hash,created_at) VALUES (?,?,?,?,?,?)",
+        (user_id, email, data.name.strip(), data.brand_name.strip(), pwd_context.hash(data.password), datetime.now(timezone.utc).isoformat()))
+    return Token(access_token=create_access_token(user_id))
 
 @router.post("/login", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    # Simplified: single admin user
-    if form_data.username == "admin" and form_data.password == settings.ADMIN_PASSWORD:
-        access_token = create_access_token(data={"sub": "admin"})
-        return {"access_token": access_token, "token_type": "bearer"}
-    
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Incorrect username or password",
-        headers={"WWW-Authenticate": "Bearer"},
+    user = await db.fetch_one("SELECT id,password_hash FROM photographers WHERE email = ?", (form_data.username.lower(),))
+    if not user or not user["password_hash"] or not pwd_context.verify(form_data.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    return Token(access_token=create_access_token(user["id"]))
+
+@router.get("/me")
+async def me(user=Depends(get_current_photographer)):
+    connection = await db.fetch_one("SELECT google_email FROM drive_connections WHERE photographer_id = ?", (user["id"],))
+    identity = await db.fetch_one("SELECT google_sub FROM photographers WHERE id = ?", (user["id"],))
+    return {**user, "drive_connected": bool(connection), "google_email": connection["google_email"] if connection else None,
+            "google_signin_enabled": bool(identity["google_sub"])}
+
+def google_flow(scopes=SCOPES):
+    if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
+        raise HTTPException(status_code=503, detail="Google Drive OAuth is not configured")
+    config = {"web": {"client_id": settings.GOOGLE_CLIENT_ID, "client_secret": settings.GOOGLE_CLIENT_SECRET,
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth", "token_uri": "https://oauth2.googleapis.com/token",
+        "redirect_uris": [settings.GOOGLE_REDIRECT_URI]}}
+    # The callback creates a new Flow instance, so it cannot recover the PKCE
+    # verifier generated by the initial instance. This is a confidential web
+    # client using a client secret and a signed, short-lived state token.
+    return Flow.from_client_config(
+        config,
+        scopes=scopes,
+        redirect_uri=settings.GOOGLE_REDIRECT_URI,
+        autogenerate_code_verifier=False,
     )
 
-async def get_current_admin(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+def google_login_error(message: str):
+    return RedirectResponse(settings.FRONTEND_URL.rstrip("/") + "/admin/login?" + urlencode({"google_error": message}))
+
+def verified_google_identity(creds):
+    if not creds.id_token:
+        raise HTTPException(status_code=400, detail="Google did not return an identity token")
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        username: str = payload.get("sub")
-        if username != "admin":
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-    return username
+        identity = google_id_token.verify_oauth2_token(
+            creds.id_token, GoogleRequest(), settings.GOOGLE_CLIENT_ID)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid Google identity token")
+    if identity.get("email_verified") is not True or not identity.get("sub") or not identity.get("email"):
+        raise HTTPException(status_code=400, detail="A verified Google email is required")
+    return identity
+
+@router.get("/google/signin-url")
+async def google_signin_url(mode: str = "login", name: str = "", brand_name: str = ""):
+    google_flow()
+    if mode not in ("login", "register"):
+        raise HTTPException(status_code=400, detail="Invalid Google sign-in mode")
+    if mode == "register" and (not name.strip() or not brand_name.strip() or len(name) > 100 or len(brand_name) > 100):
+        raise HTTPException(status_code=400, detail="Enter your name and photography brand first")
+    origin = urlsplit(settings.GOOGLE_REDIRECT_URI)
+    if not origin.scheme or not origin.netloc:
+        raise HTTPException(status_code=503, detail="Google callback URL is invalid")
+    query = urlencode({"mode": mode, "name": name.strip(), "brand_name": brand_name.strip()})
+    return {"url": f"{origin.scheme}://{origin.netloc}/auth/google/signin?{query}"}
+
+@router.get("/google/signin")
+async def google_signin(mode: str = "login", name: str = "", brand_name: str = ""):
+    if mode not in ("login", "register"):
+        raise HTTPException(status_code=400, detail="Invalid Google sign-in mode")
+    if mode == "register" and (not name.strip() or not brand_name.strip() or len(name) > 100 or len(brand_name) > 100):
+        return google_login_error("Enter your name and photography brand first")
+    nonce = secrets.token_urlsafe(32)
+    state = jwt.encode({
+        "purpose": "signin", "mode": mode, "name": name.strip(),
+        "brand_name": brand_name.strip(), "nonce": nonce,
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=10),
+    }, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    url, _ = google_flow().authorization_url(access_type="offline", prompt="consent", state=state)
+    response = RedirectResponse(url)
+    response.set_cookie("picshare_google_nonce", nonce, max_age=600, httponly=True,
+                        secure=settings.GOOGLE_REDIRECT_URI.startswith("https://"),
+                        samesite="lax", path="/auth/google/callback")
+    return response
+
+@router.get("/google/link")
+async def link_google_signin(user=Depends(get_current_photographer)):
+    state = jwt.encode({"sub": user["id"], "purpose": "link_login",
+                        "exp": datetime.now(timezone.utc) + timedelta(minutes=10)},
+                       settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    url, _ = google_flow(IDENTITY_SCOPES).authorization_url(state=state)
+    return {"url": url}
+
+@router.get("/google/connect")
+async def connect_google(user=Depends(get_current_photographer)):
+    flow = google_flow()
+    state = jwt.encode({"sub": user["id"], "purpose": "drive", "exp": datetime.now(timezone.utc)+timedelta(minutes=10)}, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    url, _ = flow.authorization_url(access_type="offline", prompt="consent", state=state)
+    return {"url": url}
+
+@router.get("/google/callback")
+async def google_callback(request: Request, code: str | None = None,
+                          state: str | None = None, error: str | None = None):
+    if error:
+        return google_login_error("Google sign-in was cancelled or denied")
+    if not code or not state:
+        raise HTTPException(status_code=400, detail="Missing Google authorization response")
+    try:
+        payload = jwt.decode(state, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        purpose = payload.get("purpose")
+        if purpose not in ("drive", "signin", "link_login"):
+            raise ValueError("Wrong OAuth purpose")
+    except (JWTError, KeyError, ValueError):
+        raise HTTPException(status_code=400, detail="Invalid OAuth state")
+
+    if purpose == "signin" and request.cookies.get("picshare_google_nonce") != payload.get("nonce"):
+        raise HTTPException(status_code=400, detail="Google sign-in session expired; please try again")
+    if purpose != "signin":
+        user_id = payload.get("sub")
+        if not user_id or not await db.fetch_one("SELECT id FROM photographers WHERE id = ?", (user_id,)):
+            raise HTTPException(status_code=400, detail="Unknown account")
+
+    flow = google_flow(IDENTITY_SCOPES if purpose == "link_login" else SCOPES)
+    flow.fetch_token(code=code)
+    creds = flow.credentials
+    if purpose == "drive":
+        if not creds.refresh_token:
+            raise HTTPException(status_code=400, detail="Google did not provide offline access")
+        from googleapiclient.discovery import build
+        google_email = build("oauth2", "v2", credentials=creds).userinfo().get().execute().get("email")
+        await save_drive_connection(user_id, google_email, creds.refresh_token)
+        return RedirectResponse(settings.FRONTEND_URL.rstrip("/") + "/admin/dashboard?drive=connected")
+
+    identity = verified_google_identity(creds)
+    google_sub = identity["sub"]
+    google_email = identity["email"].lower()
+    linked = await db.fetch_one("SELECT id FROM photographers WHERE google_sub = ?", (google_sub,))
+
+    if purpose == "link_login":
+        if linked and linked["id"] != user_id:
+            raise HTTPException(status_code=409, detail="This Google account is linked to another photographer")
+        await db.execute("UPDATE photographers SET google_sub = ? WHERE id = ?", (google_sub, user_id))
+        return RedirectResponse(settings.FRONTEND_URL.rstrip("/") + "/admin/dashboard?google=linked")
+
+    if linked:
+        user_id = linked["id"]
+    elif payload.get("mode") == "register":
+        if await db.fetch_one("SELECT id FROM photographers WHERE email = ?", (google_email,)):
+            return google_login_error("This email already has a PICSHARE account. Log in with your password, then enable Google sign-in from the dashboard.")
+        if not creds.refresh_token:
+            return google_login_error("Google did not grant offline Drive access. Please try again and approve Drive access.")
+        user_id = str(uuid.uuid4())
+        await db.execute(
+            "INSERT INTO photographers (id,email,name,brand_name,password_hash,google_sub,created_at) VALUES (?,?,?,?,?,?,?)",
+            (user_id, google_email, payload["name"], payload["brand_name"], "", google_sub,
+             datetime.now(timezone.utc).isoformat()))
+    else:
+        return google_login_error("No linked PICSHARE account. Create one with Google, or log in with your password and enable Google sign-in.")
+
+    connection = await db.fetch_one("SELECT google_email FROM drive_connections WHERE photographer_id = ?", (user_id,))
+    if creds.refresh_token and (not connection or connection["google_email"] == google_email):
+        await save_drive_connection(user_id, google_email, creds.refresh_token)
+    elif not connection:
+        return google_login_error("Google did not grant offline Drive access. Please try again and approve Drive access.")
+
+    ticket = secrets.token_urlsafe(32)
+    await db.execute("DELETE FROM oauth_login_tickets WHERE expires_at <= ?", (datetime.now(timezone.utc).isoformat(),))
+    await db.execute("INSERT INTO oauth_login_tickets (token_hash,photographer_id,expires_at) VALUES (?,?,?)",
+                     (hashlib.sha256(ticket.encode()).hexdigest(), user_id,
+                      (datetime.now(timezone.utc) + timedelta(minutes=2)).isoformat()))
+    response = RedirectResponse(settings.FRONTEND_URL.rstrip("/") + "/admin/google-callback#ticket=" + quote(ticket))
+    response.delete_cookie("picshare_google_nonce", path="/auth/google/callback")
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+async def save_drive_connection(user_id: str, email: str, refresh_token: str):
+    if not settings.TOKEN_ENCRYPTION_KEY:
+        raise HTTPException(status_code=503, detail="Token encryption is not configured")
+    encrypted = Fernet(settings.TOKEN_ENCRYPTION_KEY.encode()).encrypt(refresh_token.encode()).decode()
+    await db.execute("INSERT INTO drive_connections (photographer_id,google_email,refresh_token,connected_at) VALUES (?,?,?,?) ON CONFLICT(photographer_id) DO UPDATE SET google_email=excluded.google_email, refresh_token=excluded.refresh_token, connected_at=excluded.connected_at",
+        (user_id, email, encrypted, datetime.now(timezone.utc).isoformat()))
+
+@router.post("/google/session", response_model=Token)
+async def exchange_google_ticket(data: GoogleTicket):
+    row = await db.execute_returning_one(
+        "DELETE FROM oauth_login_tickets WHERE token_hash = ? AND expires_at > ? RETURNING photographer_id",
+        (hashlib.sha256(data.ticket.encode()).hexdigest(), datetime.now(timezone.utc).isoformat()))
+    if not row:
+        raise HTTPException(status_code=400, detail="Google sign-in expired; please try again")
+    return Token(access_token=create_access_token(row["photographer_id"]))
+
+optional_bearer = HTTPBearer(auto_error=False)
+
+async def optional_user(credentials: HTTPAuthorizationCredentials | None = Depends(optional_bearer)):
+    if not credentials:
+        return None
+    try:
+        return await get_current_photographer(credentials.credentials)
+    except HTTPException:
+        return None

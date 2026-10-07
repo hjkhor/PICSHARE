@@ -2,7 +2,7 @@ import { Metadata } from "next";
 import AdminLoginClient from "@/components/admin-login-client";
 
 export const metadata: Metadata = {
-    title: "Admin Login",
+    title: "Photographer Login",
 };
 
 export default function AdminLoginPage() {

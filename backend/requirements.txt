@@ -18,3 +18,6 @@ pyjwt
 passlib[bcrypt]
 python-jose[cryptography]
 aiosqlite
+
+email-validator
+cryptography

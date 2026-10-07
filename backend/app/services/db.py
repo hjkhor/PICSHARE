@@ -1,6 +1,8 @@
 import aiosqlite
 import os
 import json
+import uuid
+from datetime import datetime
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -20,8 +22,38 @@ class Database:
 
     async def _init_tables(self):
         await self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS photographers (
+                id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL, brand_name TEXT NOT NULL,
+                password_hash TEXT NOT NULL, google_sub TEXT UNIQUE,
+                created_at TEXT NOT NULL
+            )
+        """)
+        photographer_columns = [row[1] for row in await (await self.connection.execute("PRAGMA table_info(photographers)")).fetchall()]
+        if "google_sub" not in photographer_columns:
+            await self.connection.execute("ALTER TABLE photographers ADD COLUMN google_sub TEXT")
+        await self.connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_photographers_google_sub ON photographers (google_sub)"
+        )
+        await self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS oauth_login_tickets (
+                token_hash TEXT PRIMARY KEY,
+                photographer_id TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                FOREIGN KEY (photographer_id) REFERENCES photographers(id)
+            )
+        """)
+        await self.connection.execute("""
+            CREATE TABLE IF NOT EXISTS drive_connections (
+                photographer_id TEXT PRIMARY KEY, google_email TEXT,
+                refresh_token TEXT NOT NULL, connected_at TEXT NOT NULL,
+                FOREIGN KEY (photographer_id) REFERENCES photographers(id)
+            )
+        """)
+        await self.connection.execute("""
             CREATE TABLE IF NOT EXISTS events (
                 id TEXT PRIMARY KEY,
+                photographer_id TEXT,
                 name TEXT NOT NULL,
                 slug TEXT UNIQUE NOT NULL,
                 date TEXT NOT NULL,
@@ -33,6 +65,10 @@ class Database:
             )
         """)
 
+        columns = [row[1] for row in await (await self.connection.execute("PRAGMA table_info(events)")).fetchall()]
+        if "photographer_id" not in columns:
+            await self.connection.execute("ALTER TABLE events ADD COLUMN photographer_id TEXT")
+        # Existing events are retained, but are not silently assigned to a new account.
         await self.connection.execute("""
             CREATE TABLE IF NOT EXISTS photos (
                 id TEXT PRIMARY KEY,
@@ -103,6 +139,12 @@ class Database:
     async def execute(self, query, params=()):
         await self.connection.execute(query, params)
         await self.connection.commit()
+
+    async def execute_returning_one(self, query, params=()):
+        async with self.connection.execute(query, params) as cursor:
+            row = await cursor.fetchone()
+        await self.connection.commit()
+        return dict(row) if row else None
 
 
 db = Database()

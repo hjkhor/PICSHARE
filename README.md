@@ -50,15 +50,11 @@ drive-photo-sharing/
 
 ### 1. Prerequisites
 - **Docker & Docker Compose** (Recommended)
-- **Google Cloud Service Account** (with Drive API enabled)
+- **Google Cloud OAuth web application** (with Drive API enabled)
 - **Python 3.8+** & **Bun** (for local development)
 
 ### 2. Configure Environment
-1. **Google Drive Setup**:
-   - Create a Google Cloud Project.
-   - Enable **Google Drive API**.
-   - Create a **Service Account**, download the JSON key, and save it as `backend/data/accounts/0.json`.
-   - Share your Google Drive event folder with the service account email.
+1. **Google Drive Setup**: Follow the photographer OAuth setup below.
 
 2. **Backend Config**:
    Create `backend/.env` using the following variables (defaults provided):
@@ -66,10 +62,8 @@ drive-photo-sharing/
 | Variable | Description | Default / Example |
 |----------|-------------|---------|
 | `FACE_SIMILARITY_THRESHOLD` | Face matching threshold (0.0-1.0) | `0.6` |
-| `ADMIN_PASSWORD` | Admin dashboard password | `admin123` |
 | `SECRET_KEY` | JWT secret key | `ThisIsMyLongSecretKeyForJWT` |
 | `DB_PATH` | Path to SQLite database | `data/app.db` |
-| `SERVICE_ACCOUNTS_DIR` | Directory for JSON credentials | `data/accounts` |
 
 
 3. **Frontend Config**:
@@ -119,3 +113,61 @@ bun run dev
 ---
 
 **Built by [Yash Oswal](https://github.com/yashoswalyo) with ❤️**
+
+## Photographer accounts and Google Drive
+
+Photographers can register at `/admin/login` with email/password or enter their
+name and brand and choose **Create account with Google**. Google registration
+also connects Drive. Existing password accounts can use **Enable Google sign-in**
+in the dashboard to link a Google identity explicitly; connecting a Drive account
+alone does not turn that Drive account into a login method. After creating an
+event, they can paste a Drive folder URL into it and start sync. The event link shown in the
+dashboard opens the client selfie and matching flow. Each account sees only its
+own events and uses its own Google Drive connection.
+
+The homepage is for photographers; guests enter through a photographer's event
+link. A guest enters their name and uploads one selfie, with no email address
+required. The event page does not retain guest history in the browser; returning
+guests can upload a new selfie to search again.
+
+For Drive OAuth, enable the Google Drive API and Google OAuth consent screen in a
+Google Cloud project. Create a **Web application** OAuth client and register the
+exact backend callback URL (locally,
+`http://localhost:8000/auth/google/callback`). Add these to `backend/.env`:
+
+```env
+GOOGLE_CLIENT_ID=your-web-client-id
+GOOGLE_CLIENT_SECRET=your-web-client-secret
+GOOGLE_REDIRECT_URI=http://localhost:8000/auth/google/callback
+FRONTEND_URL=http://localhost:3005
+TOKEN_ENCRYPTION_KEY=generated-fernet-key
+SECRET_KEY=long-random-private-value
+```
+
+Generate `TOKEN_ENCRYPTION_KEY` with `python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'`.
+Keep this key backed up: losing it disconnects all photographers' Drive tokens.
+For a deployed site, use its HTTPS callback and frontend URLs. Google Drive
+`drive.readonly` is a restricted scope; a public OAuth app will need Google's
+verification before broad use. The backend stores each refresh token encrypted.
+The app reads photos from the selected Drive folder and does not modify Drive.
+For new Drive photos, indexing uses a compressed 1600-pixel preview stored locally.
+Guest galleries use small thumbnails and the preview; the original HD file stays
+in Drive and is fetched only when a guest downloads a photo or ZIP. If Drive
+does not provide a usable preview, PICSHARE temporarily downloads the original,
+creates the compact index image, and does not retain that HD copy locally.
+Existing photos indexed before this change keep their current local originals.
+
+Existing pre-account events remain in the database, unassigned and hidden. After
+registering your account, you can explicitly assign selected old events with:
+
+```bash
+cd backend
+python3 scripts/claim_legacy_events.py --email you@example.com --event-id EVENT_ID
+```
+
+Review each event and back up `backend/data/app.db` before claiming it. Existing
+Drive photos will use the newly connected account's Drive permission, so that
+Google account must be able to read the folder.
+
+For a fresh installation on another laptop, see [SETUP_NEW_LAPTOP.md](SETUP_NEW_LAPTOP.md).
+The optional free hosted event publisher is documented in [offline-host/README.md](offline-host/README.md).

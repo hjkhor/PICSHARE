@@ -1,0 +1,30 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "picshare-offline-events",
+  "main": "worker.js",
+  "compatibility_date": "2026-10-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "picshare-offline-events",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "PHOTOS",
+      "bucket_name": "picshare-offline-photos"
+    }
+  ],
+  "ratelimits": [
+    { "name": "UNLOCK_LIMIT", "namespace_id": "2026100701", "simple": { "limit": 10, "period": 60 } },
+    { "name": "SEARCH_LIMIT", "namespace_id": "2026100702", "simple": { "limit": 300, "period": 60 } }
+  ]
+}

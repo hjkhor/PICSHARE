@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Camera, Upload, CheckCircle2, Loader2, RefreshCw, XCircle, Lock, UserPlus, ArrowRight, Trash2 } from "lucide-react";
+import { Camera, Upload, CheckCircle2, Loader2, RefreshCw, XCircle, Lock } from "lucide-react";
 import { toast } from "sonner";
 import Webcam from "react-webcam";
 
@@ -25,13 +25,11 @@ export default function GuestUploadClient() {
     const [polling, setPolling] = useState(false);
     const [matchCount, setMatchCount] = useState(0);
 
-    const [eventInfo, setEventInfo] = useState<{ name: string; is_protected: boolean } | null>(null);
+    const [eventInfo, setEventInfo] = useState<{ name: string; is_protected: boolean; brand_name?: string } | null>(null);
     const [secretCode, setSecretCode] = useState("");
     const [isVerified, setIsVerified] = useState(false);
     const [checkingEvent, setCheckingEvent] = useState(true);
-    const [savedGuests, setSavedGuests] = useState<{ id: string; name: string; email: string }[]>([]);
-    const [showUploadForm, setShowUploadForm] = useState(false);
-    const [submittingGuest, setSubmittingGuest] = useState<{ name: string; email: string } | null>(null);
+    const [guestName, setGuestName] = useState("");
 
     useEffect(() => {
         if (typeof window !== "undefined" && window.location.protocol === "http:" && window.location.hostname !== "localhost") {
@@ -46,51 +44,9 @@ export default function GuestUploadClient() {
             setSecretCode(savedCode);
         }
 
-        // Load saved guests for this event
-        const saved = localStorage.getItem(`guests_${slug}`);
-        if (saved) {
-            const parsed = JSON.parse(saved);
-            setSavedGuests(parsed);
-            if (parsed.length > 0) {
-                setShowUploadForm(false);
-
-                // Verify if they still exist in DB
-                const verifySavedGuests = async () => {
-                    try {
-                        const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-                        const results = await Promise.all(
-                            parsed.map(async (g: { id: string }) => {
-                                try {
-                                    const res = await fetch(`${apiUrl}/guests/status/${g.id}`);
-                                    return { id: g.id, exists: res.ok };
-                                } catch {
-                                    return { id: g.id, exists: true }; // Keep on network error
-                                }
-                            })
-                        );
-
-                        const existingIds = results.filter(r => r.exists).map(r => r.id);
-                        const validated = parsed.filter((g: { id: string }) => existingIds.includes(g.id));
-
-                        if (validated.length !== parsed.length) {
-                            setSavedGuests(validated);
-                            localStorage.setItem(`guests_${slug}`, JSON.stringify(validated));
-                            if (validated.length === 0) {
-                                setShowUploadForm(true);
-                            }
-                            toast.info("Information: Some previously saved faces have been removed as they are no longer in the system.");
-                        }
-                    } catch (err) {
-                        console.error("Error verifying guests:", err);
-                    }
-                };
-                verifySavedGuests();
-            } else {
-                setShowUploadForm(true);
-            }
-        } else {
-            setShowUploadForm(true);
-        }
+        // Clear guest history saved by older versions of the event page.
+        localStorage.removeItem(`guests_${slug}`);
+        localStorage.removeItem(`guest_name_${slug}`);
 
         // Fetch event info
         const fetchEventInfo = async () => {
@@ -169,18 +125,6 @@ export default function GuestUploadClient() {
                             setPolling(false);
                             setLoading(false);
 
-                            // Save to local storage
-                            if (submittingGuest) {
-                                const newGuest = { id: requestId, name: submittingGuest.name, email: submittingGuest.email };
-                                const currentSaved = JSON.parse(localStorage.getItem(`guests_${slug}`) || "[]");
-
-                                // Check if already exists
-                                if (!currentSaved.some((g: { id: string }) => g.id === requestId)) {
-                                    const updated = [...currentSaved, newGuest];
-                                    localStorage.setItem(`guests_${slug}`, JSON.stringify(updated));
-                                    setSavedGuests(updated);
-                                }
-                            }
                         }
                         else if (data.status === "error") {
                             setPolling(false);
@@ -194,7 +138,7 @@ export default function GuestUploadClient() {
             }, 3000);
         }
         return () => clearInterval(interval);
-    }, [polling, requestId, submittingGuest, slug]);
+    }, [polling, requestId]);
 
     const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
         e.preventDefault();
@@ -207,15 +151,15 @@ export default function GuestUploadClient() {
         const formData = new FormData();
         const form = e.currentTarget;
         const nameInput = form.elements.namedItem("name") as HTMLInputElement;
-        const emailInput = form.elements.namedItem("email") as HTMLInputElement;
-
-        const name = nameInput.value;
-        const email = emailInput.value;
-        setSubmittingGuest({ name, email });
+        const name = nameInput.value.trim();
+        if (!name) {
+            toast.error("Please enter your name.");
+            setLoading(false);
+            return;
+        }
 
         formData.append("event_slug", slug);
         formData.append("name", name);
-        formData.append("email", email);
         formData.append("selfie", file);
         if (secretCode) {
             formData.append("secret_code", secretCode);
@@ -248,16 +192,6 @@ export default function GuestUploadClient() {
             toast.error(message);
             setLoading(false);
         }
-    };
-
-    const removeSavedGuest = (id: string) => {
-        const updated = savedGuests.filter(g => g.id !== id);
-        setSavedGuests(updated);
-        localStorage.setItem(`guests_${slug}`, JSON.stringify(updated));
-        if (updated.length === 0) {
-            setShowUploadForm(true);
-        }
-        toast.success("Face removed from this device");
     };
 
     const handleVerifyEmailCode = async (e: React.FormEvent) => {
@@ -317,6 +251,7 @@ export default function GuestUploadClient() {
                             <Lock className="w-6 h-6" />
                         </div>
                         <CardTitle className="text-2xl font-bold">{eventInfo.name}</CardTitle>
+                        {eventInfo.brand_name && <CardDescription>Photos by {eventInfo.brand_name}</CardDescription>}
                         <CardDescription>This event is protected. Please enter the secret code to continue.</CardDescription>
                     </CardHeader>
                     <form onSubmit={handleVerifyEmailCode}>
@@ -376,117 +311,26 @@ export default function GuestUploadClient() {
         );
     }
 
-    if (!showUploadForm && savedGuests.length > 0) {
-        return (
-            <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-blue-100/20 via-background to-indigo-100/20 text-foreground transition-colors duration-300">
-                <Card className="w-full max-w-2xl border border-border shadow-2xl bg-card/90 backdrop-blur-lg">
-                    <CardHeader className="text-center pb-2">
-                        <CardTitle className="text-3xl font-bold tracking-tight text-foreground">Welcome Back!</CardTitle>
-                        <CardDescription className="text-base text-muted-foreground mt-2">
-                            Select your face to view your personal gallery at <span className="font-semibold text-indigo-600">{eventInfo.name}</span>
-                        </CardDescription>
-                    </CardHeader>
-                    <CardContent className="pt-6 pb-8">
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                            {savedGuests.map((guest) => (
-                                <div
-                                    key={guest.id}
-                                    className="group relative flex items-center gap-4 p-4 rounded-2xl border border-border bg-background/50 hover:bg-indigo-50/50 hover:border-indigo-200 transition-all duration-300 shadow-sm hover:shadow-md"
-                                >
-                                    <a
-                                        href={`/event/${slug}/guest/${guest.id}`}
-                                        className="flex flex-1 items-center gap-4 min-w-0"
-                                    >
-                                        <div className="relative w-16 h-16 rounded-full overflow-hidden border-2 border-muted group-hover:border-indigo-400 transition-colors bg-muted flex-shrink-0">
-                                            {/* eslint-disable-next-line @next/next/no-img-element */}
-                                            <img
-                                                src={`${process.env.NEXT_PUBLIC_API_URL}/guests/selfie/${guest.id}`}
-                                                alt={guest.name}
-                                                className="w-full h-full object-cover"
-                                                onError={(e) => {
-                                                    const target = e.target as HTMLImageElement;
-                                                    target.style.display = 'none';
-                                                    target.parentElement?.classList.add('flex', 'items-center', 'justify-center');
-                                                    const icon = document.createElement('div');
-                                                    icon.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-8 h-8 text-muted-foreground"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
-                                                    target.parentElement?.appendChild(icon.firstChild!);
-                                                }}
-                                            />
-                                        </div>
-                                        <div className="flex-1 min-w-0">
-                                            <p className="font-bold text-foreground truncate group-hover:text-indigo-600 transition-colors uppercase text-sm tracking-wide">{guest.name}</p>
-                                            <p className="text-xs text-muted-foreground truncate">{guest.email}</p>
-                                        </div>
-                                        <ArrowRight className="w-5 h-5 text-muted-foreground group-hover:text-indigo-600 group-hover:translate-x-1 transition-all" />
-                                    </a>
-                                    <button
-                                        onClick={(e) => {
-                                            e.preventDefault();
-                                            e.stopPropagation();
-                                            removeSavedGuest(guest.id);
-                                        }}
-                                        className="p-2 text-red-500 hover:bg-red-50 rounded-full transition-colors opacity-100 group-hover:opacity-100"
-                                        title="Remove from this device"
-                                    >
-                                        <Trash2 className="w-4 h-4" />
-                                    </button>
-                                </div>
-                            ))}
-
-                            <button
-                                onClick={() => setShowUploadForm(true)}
-                                className="group flex items-center gap-4 p-4 rounded-2xl border-2 border-dashed border-border bg-transparent hover:bg-muted/30 hover:border-indigo-300 transition-all duration-300"
-                            >
-                                <div className="w-16 h-16 rounded-full border-2 border-dashed border-muted flex items-center justify-center group-hover:bg-indigo-50 group-hover:border-indigo-400 transition-colors">
-                                    <UserPlus className="w-6 h-6 text-muted-foreground group-hover:text-indigo-600" />
-                                </div>
-                                <div className="text-left">
-                                    <p className="font-bold text-foreground group-hover:text-indigo-600 transition-colors">Add New Face</p>
-                                    <p className="text-xs text-muted-foreground">Join with a different selfie</p>
-                                </div>
-                            </button>
-                        </div>
-                    </CardContent>
-                </Card>
-            </div>
-        );
-    }
-
     return (
-        <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-blue-100/20 via-background to-indigo-100/20 text-foreground transition-colors duration-300">
-            {savedGuests.length > 0 && (
-                <Button
-                    variant="ghost"
-                    onClick={() => setShowUploadForm(false)}
-                    className="mb-4 text-muted-foreground hover:text-indigo-600"
-                >
-                    <ArrowRight className="w-4 h-4 mr-2 rotate-180" />
-                    Back to my faces
-                </Button>
-            )}
-            <Card className="w-full max-w-lg border border-border shadow-2xl bg-card/90 backdrop-blur-lg">
+        <div className="guest-page min-h-screen bg-background flex flex-col items-center justify-center p-4 text-foreground">
+            <Card className="guest-card w-full max-w-lg border border-border">
                 <CardHeader className="space-y-1">
-                    <CardTitle className="text-3xl font-bold tracking-tight text-foreground">Find your photos</CardTitle>
+                    <p className="eyebrow">[ {eventInfo.brand_name || "PICSHARE"} / {eventInfo.name} ]</p>
+                    <CardTitle className="text-3xl font-bold tracking-tight text-foreground">FIND YOUR FRAME<span className="pink-cursor">_</span></CardTitle>
                     <CardDescription className="text-muted-foreground">
                         {isCameraActive ? "Take a live selfie to find your event photos." : "Upload a selfie to find your event photos."}
                     </CardDescription>
                 </CardHeader>
                 <form onSubmit={handleSubmit}>
                     <CardContent className="space-y-6">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div className="space-y-2">
-                                <Label htmlFor="name">Full Name</Label>
-                                <Input id="name" name="name" placeholder="John Doe" required className="border-border bg-background focus-visible:ring-indigo-500" />
-                            </div>
-                            <div className="space-y-2">
-                                <Label htmlFor="email">Email Address</Label>
-                                <Input id="email" name="email" type="email" placeholder="john@example.com" required className="border-border bg-background focus-visible:ring-indigo-500" />
-                            </div>
+                        <div className="space-y-2">
+                            <Label htmlFor="name">01 / YOUR NAME</Label>
+                            <Input id="name" name="name" placeholder="Your name" value={guestName} onChange={(e) => setGuestName(e.target.value)} required className="border-border bg-background focus-visible:ring-indigo-500" />
                         </div>
 
                         <div className="space-y-4">
                             <div className="flex items-center justify-between">
-                                <Label className="text-base font-semibold text-foreground">Step 2: Your Selfie</Label>
+                                <Label className="text-base font-semibold text-foreground">02 / YOUR SELFIE</Label>
                                 <button
                                     type="button"
                                     onClick={() => {
@@ -550,7 +394,6 @@ export default function GuestUploadClient() {
                                         id="selfie-input"
                                         className="hidden"
                                         accept="image/*"
-                                        capture="user"
                                         onChange={(e) => {
                                             const f = e.target.files?.[0] || null;
                                             setFile(f);
@@ -601,7 +444,7 @@ export default function GuestUploadClient() {
             </Card>
 
             <p className="mt-8 text-sm text-muted-foreground text-center max-w-xs leading-tight">
-                Privacy Protected: Your selfie is used only for matching and is deleted immediately.
+                YOUR SELFIE: Used for matching, then deleted from our server. This device does not save a guest history.
             </p>
         </div>
     );

@@ -1,7 +1,8 @@
 import uuid
 import json
 from datetime import datetime
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from app.api.auth import get_current_photographer
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from app.services.db import db
@@ -36,6 +37,7 @@ class PublicEventResponse(BaseModel):
     date: datetime
     is_protected: bool
     created_at: datetime
+    brand_name: Optional[str] = None
 
     class Config:
         populate_by_name = True
@@ -60,12 +62,12 @@ def format_event(row):
 
 @router.get("/public/list", response_model=List[PublicEventResponse])
 async def list_public_events():
-    rows = await db.fetch_all("SELECT * FROM events ORDER BY date DESC")
+    rows = await db.fetch_all("SELECT e.*, p.brand_name FROM events e JOIN photographers p ON p.id = e.photographer_id ORDER BY e.date DESC")
     return [format_event(row) for row in rows]
 
 @router.get("/public/{slug}", response_model=PublicEventResponse)
 async def get_public_event(slug: str):
-    row = await db.fetch_one("SELECT * FROM events WHERE slug = ?", (slug,))
+    row = await db.fetch_one("SELECT e.*, p.brand_name FROM events e JOIN photographers p ON p.id = e.photographer_id WHERE e.slug = ?", (slug,))
     if not row:
         raise HTTPException(status_code=404, detail="Event not found")
     return format_event(row)
@@ -76,7 +78,7 @@ class CodeVerify(BaseModel):
 
 @router.post("/verify")
 async def verify_event_code(data: CodeVerify):
-    row = await db.fetch_one("SELECT * FROM events WHERE slug = ?", (data.slug,))
+    row = await db.fetch_one("SELECT * FROM events WHERE slug = ? AND photographer_id IS NOT NULL", (data.slug,))
     if not row:
         raise HTTPException(status_code=404, detail="Event not found")
     
@@ -84,11 +86,11 @@ async def verify_event_code(data: CodeVerify):
     if event.get("secret_code") and event["secret_code"] != data.code:
         raise HTTPException(status_code=401, detail="Invalid secret code")
     
-    return {"status": "success", "event": event}
+    return {"status": "success", "event": {k: v for k, v in event.items() if k != "secret_code"}}
 
 @router.post("", response_model=EventResponse)
 @router.post("/", response_model=EventResponse)
-async def create_event(event: EventCreate):
+async def create_event(event: EventCreate, user=Depends(get_current_photographer)):
     # Check if slug exists
     existing = await db.fetch_one("SELECT id FROM events WHERE slug = ?", (event.slug,))
     if existing:
@@ -98,10 +100,11 @@ async def create_event(event: EventCreate):
     created_at = datetime.utcnow().isoformat()
     
     await db.execute("""
-        INSERT INTO events (id, name, slug, date, drive_folder_url, secret_code, sync_status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO events (id, photographer_id, name, slug, date, drive_folder_url, secret_code, sync_status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        event_id, 
+        event_id,
+        user["id"],
         event.name, 
         event.slug, 
         event.date.isoformat(), 
@@ -111,19 +114,19 @@ async def create_event(event: EventCreate):
         created_at
     ))
     
-    row = await db.fetch_one("SELECT * FROM events WHERE id = ?", (event_id,))
+    row = await db.fetch_one("SELECT * FROM events WHERE id = ? AND photographer_id = ?", (event_id, user["id"]))
     return format_event(row)
 
 @router.get("", response_model=List[EventResponse])
 @router.get("/", response_model=List[EventResponse])
-async def list_events():
-    rows = await db.fetch_all("SELECT * FROM events ORDER BY created_at DESC")
+async def list_events(user=Depends(get_current_photographer)):
+    rows = await db.fetch_all("SELECT * FROM events WHERE photographer_id = ? ORDER BY created_at DESC", (user["id"],))
     return [format_event(row) for row in rows]
 
 @router.put("/{event_id}", response_model=EventResponse)
-async def update_event(event_id: str, event_data: dict):
+async def update_event(event_id: str, event_data: dict, user=Depends(get_current_photographer)):
     # event_data comes as a dict from frontend
-    existing = await db.fetch_one("SELECT id FROM events WHERE id = ?", (event_id,))
+    existing = await db.fetch_one("SELECT id FROM events WHERE id = ? AND photographer_id = ?", (event_id, user["id"]))
     if not existing:
         raise HTTPException(status_code=404, detail="Event not found")
     
@@ -135,7 +138,7 @@ async def update_event(event_id: str, event_data: dict):
     params = []
     for key, value in event_data.items():
         # Map frontend _id back to id if necessary, but usually we don't update ID
-        if key == "_id": continue 
+        if key not in {"name", "date", "drive_folder_url", "secret_code"}: continue
         
         fields.append(f"{key} = ?")
         if isinstance(value, datetime):
@@ -143,23 +146,25 @@ async def update_event(event_id: str, event_data: dict):
         else:
             params.append(value)
     
-    params.append(event_id)
-    query = f"UPDATE events SET {', '.join(fields)} WHERE id = ?"
+    if not fields:
+        raise HTTPException(status_code=400, detail="No editable fields")
+    params.extend([event_id, user["id"]])
+    query = f"UPDATE events SET {', '.join(fields)} WHERE id = ? AND photographer_id = ?"
     
     await db.execute(query, params)
     
-    updated = await db.fetch_one("SELECT * FROM events WHERE id = ?", (event_id,))
+    updated = await db.fetch_one("SELECT * FROM events WHERE id = ? AND photographer_id = ?", (event_id, user["id"]))
     return format_event(updated)
 
 @router.get("/{event_id}", response_model=EventResponse)
-async def get_event(event_id: str):
-    row = await db.fetch_one("SELECT * FROM events WHERE id = ?", (event_id,))
+async def get_event(event_id: str, user=Depends(get_current_photographer)):
+    row = await db.fetch_one("SELECT * FROM events WHERE id = ? AND photographer_id = ?", (event_id, user["id"]))
     if not row:
         raise HTTPException(status_code=404, detail="Event not found")
     return format_event(row)
 
 @router.get("/{event_id}/storage")
-async def get_event_storage(event_id: str):
+async def get_event_storage(event_id: str, user=Depends(get_current_photographer)):
     """Get storage usage information for an event"""
     import os
     import shutil
@@ -168,7 +173,7 @@ async def get_event_storage(event_id: str):
     settings = get_settings()
     
     # Check if event exists
-    event = await db.fetch_one("SELECT * FROM events WHERE id = ?", (event_id,))
+    event = await db.fetch_one("SELECT * FROM events WHERE id = ? AND photographer_id = ?", (event_id, user["id"]))
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
     
@@ -187,6 +192,9 @@ async def get_event_storage(event_id: str):
                 event_storage += os.path.getsize(original_path)
         
         # Check thumbnail files
+        index_path = os.path.join(settings.INDEX_ROOT, f"{photo_id}.jpg")
+        if os.path.exists(index_path):
+            event_storage += os.path.getsize(index_path)
         thumbnail_path = photo.get("thumbnail_path")
         if thumbnail_path and os.path.exists(thumbnail_path):
             event_storage += os.path.getsize(thumbnail_path)
@@ -231,7 +239,7 @@ async def get_event_storage(event_id: str):
     }
 
 @router.delete("/{event_id}")
-async def delete_event(event_id: str):
+async def delete_event(event_id: str, user=Depends(get_current_photographer)):
     """Delete an event and all associated data (photos, faces, guests, files)"""
     import os
     import shutil
@@ -240,7 +248,7 @@ async def delete_event(event_id: str):
     settings = get_settings()
     
     # Check if event exists
-    event = await db.fetch_one("SELECT * FROM events WHERE id = ?", (event_id,))
+    event = await db.fetch_one("SELECT * FROM events WHERE id = ? AND photographer_id = ?", (event_id, user["id"]))
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
     
@@ -261,6 +269,9 @@ async def delete_event(event_id: str):
                         print(f"Error deleting original {original_path}: {e}")
             
             # Delete thumbnail files
+            index_path = os.path.join(settings.INDEX_ROOT, f"{photo_id}.jpg")
+            if os.path.exists(index_path):
+                os.remove(index_path)
             thumbnail_path = photo.get("thumbnail_path")
             if thumbnail_path and os.path.exists(thumbnail_path):
                 try:
@@ -283,7 +294,7 @@ async def delete_event(event_id: str):
         await db.execute("DELETE FROM faces WHERE event_id = ?", (event_id,))
         await db.execute("DELETE FROM photos WHERE event_id = ?", (event_id,))
         await db.execute("DELETE FROM guests WHERE event_id = ?", (event_id,))
-        await db.execute("DELETE FROM events WHERE id = ?", (event_id,))
+        await db.execute("DELETE FROM events WHERE id = ? AND photographer_id = ?", (event_id, user["id"]))
         
         return {
             "message": "Event deleted successfully",

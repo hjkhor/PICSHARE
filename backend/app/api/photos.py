@@ -6,11 +6,12 @@ import asyncio
 import io
 from typing import List
 from datetime import datetime
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from PIL import Image
 from app.core.config import get_settings
 from app.services.db import db
+from app.api.auth import get_current_photographer, optional_user
 from app.services.drive_service import drive_service
 from app.services.face_service import face_service
 from app.services.thumbnail_service import thumbnail_service
@@ -19,8 +20,27 @@ router = APIRouter(prefix="/photos", tags=["photos"])
 settings = get_settings()
 
 os.makedirs(settings.UPLOAD_ROOT, exist_ok=True)
+os.makedirs(settings.INDEX_ROOT, exist_ok=True)
 os.makedirs(settings.THUMBNAIL_ROOT, exist_ok=True)
 
+
+
+async def require_owned_event(event_id: str, user_id: str):
+    row = await db.fetch_one("SELECT id FROM events WHERE id = ? AND photographer_id = ?", (event_id, user_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+async def authorize_photo(photo_id: str, guest_id: str | None, user):
+    row = await db.fetch_one("SELECT p.*, e.photographer_id FROM photos p JOIN events e ON e.id = p.event_id WHERE p.id = ?", (photo_id,))
+    if not row or not row["photographer_id"]:
+        raise HTTPException(status_code=404, detail="Photo not found")
+    if user and user["id"] == row["photographer_id"]:
+        return row
+    if guest_id:
+        guest = await db.fetch_one("SELECT matched_photo_ids FROM guests WHERE id = ? AND event_id = ?", (guest_id, row["event_id"]))
+        if guest and photo_id in json.loads(guest["matched_photo_ids"] or "[]"):
+            return row
+    raise HTTPException(status_code=404, detail="Photo not found")
 
 def format_photo(row):
     if not row: return None
@@ -36,13 +56,9 @@ async def process_photo(photo_id: str,
                         event_slug: str,
                         original_path: str,
                         filename: str,
-                        drive_file_id: str = None):
+                        drive_file_id: str = None,
+                        original_dimensions: tuple[int | None, int | None] | None = None):
     try:
-        # 1. Upload to Drive ONLY if we don't already have a drive_file_id
-        if not drive_file_id:
-            drive_file_id = await drive_service.upload_photo(original_path,
-                                                             event_slug,
-                                                             filename=filename)
 
         # 2. Generate Thumbnail
         thumb_path = os.path.join(settings.THUMBNAIL_ROOT, f"{photo_id}.jpg")
@@ -58,22 +74,10 @@ async def process_photo(photo_id: str,
             with Image.open(path) as img:
                 return img.size
 
-        width, height = await asyncio.to_thread(get_image_size, original_path)
+        width, height = original_dimensions if original_dimensions and all(original_dimensions) else await asyncio.to_thread(get_image_size, original_path)
 
-        await db.execute(
-            """
-            UPDATE photos SET 
-                drive_file_id = ?, 
-                thumbnail_path = ?, 
-                width = ?, 
-                height = ?, 
-                faces_count = ?, 
-                status = ?
-            WHERE id = ?
-        """, (drive_file_id, thumb_path, width, height, len(faces_data),
-              "processed", photo_id))
-
-        # 5. Store Faces
+        # Reprocessing an interrupted photo must not duplicate partial face rows.
+        await db.execute("DELETE FROM faces WHERE photo_id = ?", (photo_id,))
         for f in faces_data:
             face_id = str(uuid.uuid4())
             embedding_json = json.dumps(f["embedding"].tolist(
@@ -92,6 +96,15 @@ async def process_photo(photo_id: str,
             """, (face_id, photo_id, event_id, embedding_json, bbox_json,
                   datetime.utcnow().isoformat()))
 
+        await db.execute(
+            """
+            UPDATE photos SET
+                drive_file_id = ?, thumbnail_path = ?, width = ?, height = ?,
+                faces_count = ?, status = ?
+            WHERE id = ?
+            """, (drive_file_id, thumb_path, width, height, len(faces_data),
+                  "processed", photo_id))
+
     except Exception as e:
         print(f"Error processing photo {photo_id}: {e}")
         await db.execute("UPDATE photos SET status = ? WHERE id = ?",
@@ -101,9 +114,10 @@ async def process_photo(photo_id: str,
 @router.post("/upload")
 async def upload_photos(background_tasks: BackgroundTasks,
                         event_id: str,
-                        files: List[UploadFile] = File(...)):
-    row = await db.fetch_one("SELECT slug FROM events WHERE id = ?",
-                             (event_id, ))
+                        files: List[UploadFile] = File(...),
+                        user=Depends(get_current_photographer)):
+    row = await db.fetch_one("SELECT slug FROM events WHERE id = ? AND photographer_id = ?",
+                             (event_id, user["id"]))
     if not row:
         raise HTTPException(status_code=404, detail="Event not found")
     event_slug = row["slug"]
@@ -153,21 +167,20 @@ async def run_sync_task(event_id: str):
             event["drive_folder_url"])
         print(f"Starting sync for folder: {folder_id}")
 
-        files_to_sync = await drive_service.list_files_recursive(folder_id)
+        files_to_sync = await drive_service.list_files_recursive(folder_id, event["photographer_id"])
         print(f"Found {len(files_to_sync)} files in Drive total")
 
         new_files = []
         pending_photos = []
         for f in files_to_sync:
             existing = await db.fetch_one(
-                "SELECT id, status FROM photos WHERE drive_file_id = ?", (f["id"], ))
+                "SELECT id, status FROM photos WHERE event_id = ? AND drive_file_id = ?", (event_id, f["id"]))
             if not existing:
                 new_files.append(f)
             elif existing["status"] == "pending":
                 photo_id :str = existing["id"]
-                file_ext :str = f['name'].split(".")[-1] if "." in f['name'] else "jpg"  
-                original_path :str = os.path.join(settings.UPLOAD_ROOT, f"{photo_id}.{file_ext}")
-                pending_photos.append((photo_id, original_path, f))
+                index_path = os.path.join(settings.INDEX_ROOT, f"{photo_id}.jpg")
+                pending_photos.append((photo_id, index_path, f))
             else:
                 print(f"Skipping already synced file: {f['name']}")
 
@@ -178,9 +191,7 @@ async def run_sync_task(event_id: str):
         inserted_items = []
         for f in new_files:
             photo_id = str(uuid.uuid4())
-            file_ext = f['name'].split(".")[-1] if "." in f['name'] else "jpg"
-            original_path = os.path.join(settings.UPLOAD_ROOT,
-                                         f"{photo_id}.{file_ext}")
+            index_path = os.path.join(settings.INDEX_ROOT, f"{photo_id}.jpg")
 
             await db.execute(
                 """
@@ -188,30 +199,26 @@ async def run_sync_task(event_id: str):
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (photo_id, event_id, f['name'], f["id"], "pending",
                   datetime.utcnow().isoformat()))
-            inserted_items.append((photo_id, original_path, f))
+            inserted_items.append((photo_id, index_path, f))
 
         # download and process
-        for photo_id, original_path, f in pending_photos + inserted_items:
+        for photo_id, index_path, f in pending_photos + inserted_items:
             try:
-                print(f"Downloading & Processing: {f['name']}")
-                content, filename = await drive_service.download_file(f["id"])
-                if not content:
-                    await db.execute(
-                        "UPDATE photos SET status = ? WHERE id = ?",
-                        ("error", photo_id))
-                    continue
-
-                with open(original_path, "wb") as buffer:
-                    buffer.write(content)
+                print(f"Indexing Drive preview: {f['name']}")
+                original_dimensions = await drive_service.download_index_image(
+                    f["id"], event["photographer_id"], index_path)
 
                 await process_photo(photo_id,
                                     event_id,
                                     event["slug"],
-                                    original_path,
-                                    filename,
-                                    drive_file_id=f["id"])
+                                    index_path,
+                                    f["name"],
+                                    drive_file_id=f["id"],
+                                    original_dimensions=original_dimensions)
             except Exception as loop_err:
                 print(f"Error processing synced photo {f['name']}: {loop_err}")
+                if os.path.exists(index_path):
+                    os.remove(index_path)
                 await db.execute("UPDATE photos SET status = ? WHERE id = ?",
                                  ("error", photo_id))
 
@@ -227,23 +234,29 @@ async def run_sync_task(event_id: str):
 
 
 @router.post("/sync/{event_id}")
-async def start_sync(event_id: str, background_tasks: BackgroundTasks):
+async def start_sync(event_id: str, background_tasks: BackgroundTasks, user=Depends(get_current_photographer)):
     row = await db.fetch_one(
-        "SELECT drive_folder_url FROM events WHERE id = ?", (event_id, ))
+        "SELECT drive_folder_url, sync_status FROM events WHERE id = ? AND photographer_id = ?", (event_id, user["id"]))
     if not row:
         raise HTTPException(status_code=404, detail="Event not found")
 
     if not row["drive_folder_url"]:
         raise HTTPException(status_code=400,
                             detail="Drive folder URL not configured")
+    if row["sync_status"] == "syncing":
+        raise HTTPException(status_code=409, detail="Sync is already in progress")
+    connection = await db.fetch_one("SELECT photographer_id FROM drive_connections WHERE photographer_id = ?", (user["id"],))
+    if not connection:
+        raise HTTPException(status_code=400, detail="Connect Google Drive first")
 
+    await db.execute("UPDATE events SET sync_status = 'syncing' WHERE id = ?", (event_id,))
     background_tasks.add_task(run_sync_task, event_id)
     return {"message": "Sync started in background"}
 
 
 @router.get("/status/{event_id}")
-async def get_event_status(event_id: str):
-    row = await db.fetch_one("SELECT * FROM events WHERE id = ?", (event_id, ))
+async def get_event_status(event_id: str, user=Depends(get_current_photographer)):
+    row = await db.fetch_one("SELECT * FROM events WHERE id = ? AND photographer_id = ?", (event_id, user["id"]))
     if not row:
         raise HTTPException(status_code=404, detail="Event not found")
     event = dict(row)
@@ -287,8 +300,9 @@ async def get_event_status(event_id: str):
 
 
 @router.get("/event/{event_id}/gallery")
-async def get_event_photos(event_id: str, page: int = 1, limit: int = 100):
+async def get_event_photos(event_id: str, page: int = 1, limit: int = 100, user=Depends(get_current_photographer)):
     """Get all photos for an event with pagination"""
+    await require_owned_event(event_id, user["id"])
     offset = (page - 1) * limit
     
     # Get total count
@@ -321,9 +335,9 @@ async def get_event_photos(event_id: str, page: int = 1, limit: int = 100):
 
 
 @router.delete("/delete/{photo_id}")
-async def delete_photo(photo_id: str):
+async def delete_photo(photo_id: str, user=Depends(get_current_photographer)):
     """Delete a single photo and its associated data"""
-    photo = await db.fetch_one("SELECT * FROM photos WHERE id = ?", (photo_id,))
+    photo = await db.fetch_one("SELECT p.* FROM photos p JOIN events e ON e.id = p.event_id WHERE p.id = ? AND e.photographer_id = ?", (photo_id, user["id"]))
     if not photo:
         raise HTTPException(status_code=404, detail="Photo not found")
     
@@ -336,6 +350,9 @@ async def delete_photo(photo_id: str):
                     os.remove(original_path)
                 except Exception as e:
                     print(f"Error deleting original {original_path}: {e}")
+        index_path = os.path.join(settings.INDEX_ROOT, f"{photo_id}.jpg")
+        if os.path.exists(index_path):
+            os.remove(index_path)
         
         # Delete thumbnail
         thumbnail_path = photo.get("thumbnail_path")
@@ -356,14 +373,14 @@ async def delete_photo(photo_id: str):
 
 
 @router.post("/delete/bulk")
-async def delete_photos_bulk(photo_ids: List[str]):
+async def delete_photos_bulk(photo_ids: List[str], user=Depends(get_current_photographer)):
     """Delete multiple photos and their associated data"""
     deleted_count = 0
     errors = []
     
     for photo_id in photo_ids:
         try:
-            photo = await db.fetch_one("SELECT * FROM photos WHERE id = ?", (photo_id,))
+            photo = await db.fetch_one("SELECT p.* FROM photos p JOIN events e ON e.id = p.event_id WHERE p.id = ? AND e.photographer_id = ?", (photo_id, user["id"]))
             if not photo:
                 errors.append(f"Photo {photo_id} not found")
                 continue
@@ -376,6 +393,9 @@ async def delete_photos_bulk(photo_ids: List[str]):
                         os.remove(original_path)
                     except Exception as e:
                         print(f"Error deleting original {original_path}: {e}")
+            index_path = os.path.join(settings.INDEX_ROOT, f"{photo_id}.jpg")
+            if os.path.exists(index_path):
+                os.remove(index_path)
             
             # Delete thumbnail
             thumbnail_path = photo.get("thumbnail_path")
@@ -401,8 +421,8 @@ async def delete_photos_bulk(photo_ids: List[str]):
 
 
 @router.get("/original/{photo_id}")
-async def get_original(photo_id: str):
-    row = await db.fetch_one("SELECT * FROM photos WHERE id = ?", (photo_id, ))
+async def get_original(photo_id: str, guest_id: str | None = None, user=Depends(optional_user)):
+    row = await authorize_photo(photo_id, guest_id, user)
     if not row:
         raise HTTPException(status_code=404, detail="Photo not found")
     photo = dict(row)
@@ -420,7 +440,7 @@ async def get_original(photo_id: str):
     if photo.get("drive_file_id"):
         try:
             content, filename = await drive_service.download_file(
-                photo["drive_file_id"])
+                photo["drive_file_id"], photo["photographer_id"])
             if content:
                 return StreamingResponse(io.BytesIO(content),
                                          media_type="image/jpeg")
@@ -431,9 +451,8 @@ async def get_original(photo_id: str):
 
 
 @router.get("/thumbnail/{photo_id}")
-async def get_thumbnail(photo_id: str):
-    row = await db.fetch_one("SELECT thumbnail_path FROM photos WHERE id = ?",
-                             (photo_id, ))
+async def get_thumbnail(photo_id: str, guest_id: str | None = None, user=Depends(optional_user)):
+    row = await authorize_photo(photo_id, guest_id, user)
     if not row or not row["thumbnail_path"]:
         raise HTTPException(status_code=404, detail="Thumbnail not found")
 
@@ -444,16 +463,32 @@ async def get_thumbnail(photo_id: str):
     return FileResponse(row["thumbnail_path"])
 
 
+@router.get("/preview/{photo_id}")
+async def get_preview(photo_id: str, guest_id: str | None = None, user=Depends(optional_user)):
+    row = await authorize_photo(photo_id, guest_id, user)
+    index_path = os.path.join(settings.INDEX_ROOT, f"{photo_id}.jpg")
+    if os.path.exists(index_path):
+        return FileResponse(index_path, media_type="image/jpeg")
+    if row["thumbnail_path"] and os.path.exists(row["thumbnail_path"]):
+        return FileResponse(row["thumbnail_path"], media_type="image/jpeg")
+    raise HTTPException(status_code=404, detail="Preview not found")
+
+
 @router.get("/download/{photo_id}")
-async def download_photo(photo_id: str):
-    row = await db.fetch_one("SELECT drive_file_id FROM photos WHERE id = ?",
-                             (photo_id, ))
-    if not row or not row["drive_file_id"]:
+async def download_photo(photo_id: str, guest_id: str | None = None, user=Depends(optional_user)):
+    row = await authorize_photo(photo_id, guest_id, user)
+    if not row:
+        raise HTTPException(status_code=404, detail="Photo not found")
+    if not row["drive_file_id"]:
+        for ext in ["jpg", "jpeg", "png", "webp", "JPG", "JPEG", "PNG", "WEBP"]:
+            path = os.path.join(settings.UPLOAD_ROOT, f"{photo_id}.{ext}")
+            if os.path.exists(path):
+                return FileResponse(path, filename=row.get("original_file_name") or f"{photo_id}.{ext}")
         raise HTTPException(status_code=404, detail="Photo not found")
 
     try:
         content, filename = await drive_service.download_file(
-            row["drive_file_id"])
+            row["drive_file_id"], row["photographer_id"])
         if content is None:
             raise HTTPException(status_code=500,
                                 detail="Failed to download from Drive")
